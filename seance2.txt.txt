@@ -1,1 +1,2 @@
 bonjour tout le monde
+les commandes de base git
