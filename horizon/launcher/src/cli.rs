@@ -153,6 +153,30 @@ enum AccountCmd {
         #[arg(long)]
         no_cape: bool,
     },
+    /// An Ely.by account (https://ely.by), to join servers that use Ely.by. Play still needs a
+    /// Microsoft account that owns Minecraft: Java Edition
+    Elyby {
+        #[command(subcommand)]
+        action: ElyCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum ElyCmd {
+    /// Sign in with your Ely.by login (name or e-mail); the password is read from
+    /// HORIZON_ELYBY_PASSWORD or standard input
+    SignIn {
+        login: String,
+        /// Your two-factor code, if the account has one
+        #[arg(long)]
+        totp: Option<String>,
+    },
+    /// The game gets the Ely.by session (on) or the Microsoft one (off)
+    Use { on: bool },
+    /// Sign out of Ely.by
+    SignOut,
+    /// The Ely.by account and whether it plays
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -2052,6 +2076,7 @@ fn account_command(action: AccountCmd, as_json: bool) -> Result<(), String> {
                 );
             }
         }
+        AccountCmd::Elyby { action } => elyby_command(&mut accounts, action)?,
         AccountCmd::ForgetOffline { name } => {
             accounts.remove_offline(&name, &horizon_launcher::skins::dir())?;
             accounts.save()?;
@@ -3894,4 +3919,61 @@ mod tests {
         }
         assert_eq!(native_mods::base_for(None, &[], false), None);
     }
+}
+
+fn elyby_command(accounts: &mut Accounts, action: ElyCmd) -> Result<(), String> {
+    use account::elyby;
+    match action {
+        ElyCmd::SignIn { login, totp } => {
+            let password = match std::env::var("HORIZON_ELYBY_PASSWORD") {
+                Ok(p) if !p.is_empty() => p,
+                _ => {
+                    eprint!("Ely.by password: ");
+                    let mut line = String::new();
+                    std::io::stdin()
+                        .read_line(&mut line)
+                        .map_err(|e| e.to_string())?;
+                    line.trim_end_matches(['\r', '\n']).to_owned()
+                }
+            };
+            let mut ely = elyby::sign_in(account::store(), &login, &password, totp.as_deref())?;
+            ely.play = accounts.elyby.as_ref().is_some_and(|e| e.play);
+            println!("Signed in to Ely.by as {}.", ely.name);
+            accounts.elyby = Some(ely);
+            accounts.save()?;
+        }
+        ElyCmd::Use { on } => {
+            let ely = accounts
+                .elyby
+                .as_mut()
+                .ok_or("No Ely.by account: `horizon-launcher account elyby sign-in LOGIN`.")?;
+            ely.play = on;
+            accounts.save()?;
+            println!(
+                "{}",
+                if on {
+                    "The game plays with the Ely.by session (Play still needs a Microsoft account that owns the game)."
+                } else {
+                    "The game plays with the Microsoft session."
+                }
+            );
+        }
+        ElyCmd::SignOut => {
+            if let Some(ely) = accounts.elyby.take() {
+                elyby::sign_out(account::store(), &ely)?;
+                accounts.save()?;
+                println!("Signed out of Ely.by.");
+            }
+        }
+        ElyCmd::Status => match &accounts.elyby {
+            Some(e) => println!(
+                "Ely.by: {} ({}), {}",
+                e.name,
+                e.uuid,
+                if e.play { "plays" } else { "not used" }
+            ),
+            None => println!("No Ely.by account."),
+        },
+    }
+    Ok(())
 }

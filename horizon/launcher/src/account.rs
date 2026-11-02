@@ -12,6 +12,7 @@
 //!
 //! The Azure app (client ID) is Horizon's own and is configuration: `HORIZON_MSA_CLIENT_ID` at
 //! build time, or at run time to override it. Without one, sign-in says it is not configured.
+pub mod elyby;
 pub mod session;
 
 use serde_json::{json, Value};
@@ -1503,6 +1504,9 @@ pub struct Accounts {
     /// Each offline name's skin and cape (`skins`), by the name in lowercase.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub looks: std::collections::BTreeMap<String, crate::skins::Look>,
+    /// The Ely.by account, if one is signed in (public data only; tokens are in the keychain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elyby: Option<elyby::ElyAccount>,
 }
 
 /// Who plays, as the quick switch lists them.
@@ -1867,6 +1871,23 @@ pub fn write_session_file(
     account: &Account,
     secrets: &Secrets,
 ) -> Result<PathBuf, String> {
+    write_private_session(
+        dir,
+        &json!({
+            "name": account.name,
+            "uuid": account.uuid,
+            "access_token": secrets.minecraft_token,
+            "user_type": "msa",
+            "xuid": secrets.xuid,
+        }),
+    )
+}
+
+/// A fresh session file holding `body`, readable by this user only (Microsoft or Ely.by).
+pub(crate) fn write_private_session(
+    dir: &Path,
+    body: &serde_json::Value,
+) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     // Leftovers of games that never started (refused by the game after two minutes anyway).
     if let Ok(entries) = std::fs::read_dir(dir) {
@@ -1891,13 +1912,6 @@ pub fn write_session_file(
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(&path).map_err(|e| e.to_string())?;
-    let body = json!({
-        "name": account.name,
-        "uuid": account.uuid,
-        "access_token": secrets.minecraft_token,
-        "user_type": "msa",
-        "xuid": secrets.xuid,
-    });
     std::io::Write::write_all(&mut file, body.to_string().as_bytes()).map_err(|e| e.to_string())?;
     Ok(path)
 }
@@ -2078,6 +2092,17 @@ fn launch_as(
 
 /// The game's session file for a launch that passed the gate, or why it plays offline.
 fn session_file(game_home: &Path, pass: Launch) -> (Option<PathBuf>, Option<String>) {
+    // Ely.by plays only behind an owner: the gate passed and named one.
+    if pass.owner.is_some() {
+        if let Some(ely) = Accounts::load().elyby.filter(|e| e.play) {
+            return match elyby::renew(store(), &ely)
+                .and_then(|s| elyby::write_session_file(&game_home.join("sessions"), &ely, &s))
+            {
+                Ok(file) => (Some(file), None),
+                Err(e) => (None, Some(e)),
+            };
+        }
+    }
     let Some((account, secrets)) = pass.session else {
         return (None, pass.offline);
     };
